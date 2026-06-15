@@ -1,2 +1,2 @@
-# disaster-equity-tracker
+# referral-copilot
 Dakabricks Hackathon
