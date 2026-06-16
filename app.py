@@ -104,6 +104,16 @@ html, body, [class*="css"] {
 .conf-coordinate   { background: #FFF8E1; color: #F57F17; }
 .conf-ambiguous    { background: #FFF3E0; color: #E65100; }
 .conf-unresolved   { background: #FFEBEE; color: #C62828; }
+.signal-badge {
+    display: inline-block;
+    background: #E8F0FE;
+    color: #174EA6;
+    font-size: 0.78rem;
+    font-weight: 500;
+    padding: 0.2rem 0.6rem;
+    border-radius: 3px;
+    margin-right: 0.5rem;
+}
 
 .evidence-section {
     margin-top: 0.8rem;
@@ -181,7 +191,11 @@ CARE_NEEDS = {
     "maternity":        ["maternity", "obstetrics", "gynaecology", "gynecology", "delivery", "neonatal", "prenatal"],
     "cardiac":          ["cardiac", "cardiology", "heart", "cardiovascular", "angioplasty", "bypass"],
     "cancer":           ["cancer", "oncology", "chemotherapy", "radiation", "tumour", "tumor"],
-    "orthopedic":       ["orthopedic", "orthopaedic", "fracture", "joint replacement", "spine", "bone"],
+    "orthopedic":       [
+        "orthopedic", "orthopaedic", "orthopedics", "orthopaedics",
+        "fracture", "broken", "broke", "surgery", "surgical", "trauma",
+        "joint replacement", "spine", "bone", "hand", "wrist", "arm",
+    ],
     "eye":              ["eye", "ophthalmology", "cataract", "retina", "glaucoma", "vision"],
     "dental":           ["dental", "dentist", "dentistry", "teeth", "oral", "tooth"],
     "neurology":        ["neurology", "neuro", "brain", "stroke", "seizure", "epilepsy"],
@@ -192,7 +206,8 @@ STOPWORDS = {
     "a", "an", "and", "around", "at", "best", "care", "center", "centre", "clinic",
     "doctor", "doctors", "facility", "find", "for", "help", "hospital", "hospitals",
     "in", "me", "near", "nearby", "need", "of", "please", "support", "the", "to",
-    "treatment", "with",
+    "treatment", "with", "want", "make", "sure", "live", "require", "requires",
+    "required", "plenty", "newer", "good", "ratings", "rating", "machines",
 }
 
 EVIDENCE_FIELD_LABELS = {
@@ -266,9 +281,29 @@ def fallback_keywords(query: str, city: str, mapped_keywords: list) -> list:
     return unique_terms(list(mapped_keywords or []) + query_terms)
 
 
+def infer_care_need(query: str, care_need: str, keywords: list) -> tuple[str, list]:
+    q = query.lower()
+    injury_words = {"broke", "broken", "fracture", "fractured"}
+    limb_words = {"hand", "wrist", "arm", "finger", "thumb", "bone"}
+
+    if any(word in q for word in injury_words) and any(word in q for word in limb_words):
+        orthopedic_keywords = [
+            "orthopedic", "orthopaedic", "orthopedics", "orthopaedics",
+            "fracture", "trauma", "bone", "hand surgery", "surgery", "surgical",
+        ]
+        return "orthopedic fracture surgery", unique_terms(orthopedic_keywords + keywords)
+
+    if "surgery" in q or "surgical" in q:
+        surgical_keywords = ["surgery", "surgical", "operation", "trauma"]
+        return care_need or "surgical care", unique_terms(surgical_keywords + keywords)
+
+    return care_need, keywords
+
+
 def get_search_plan_fallback(query: str, default_radius_km: int) -> dict:
     city, coords, care_need, mapped_keywords = parse_query(query)
     keywords = fallback_keywords(query, city, mapped_keywords)
+    care_need, keywords = infer_care_need(query, care_need, keywords)
     if not care_need and keywords:
         care_need = " ".join(keywords[:3])
     if not care_need:
@@ -279,9 +314,22 @@ def get_search_plan_fallback(query: str, default_radius_km: int) -> dict:
         "coords": coords,
         "care_need": care_need,
         "keywords": keywords,
+        "preferences": infer_preferences(query),
         "radius_km": clamp_radius_km(default_radius_km, 50),
         "source": "keyword fallback",
     }
+
+
+def infer_preferences(query: str) -> list:
+    q = query.lower()
+    preferences = []
+    if any(term in q for term in ["big hospital", "large hospital", "plenty", "many doctors"]):
+        preferences.append("larger facility")
+    if any(term in q for term in ["newer machines", "advanced equipment", "machines", "equipment"]):
+        preferences.append("advanced equipment")
+    if any(term in q for term in ["good ratings", "rating", "ratings", "review", "reviews"]):
+        preferences.append("good ratings")
+    return preferences
 
 
 def extract_json_object(text: str) -> dict:
@@ -359,12 +407,14 @@ Return only this JSON shape:
   "keywords": string[],
   "must_have": string[],
   "nice_to_have": string[],
+  "preferences": string[],
   "radius_km": number or null
 }}
 
 Rules:
 - Expand clinical synonyms and Indian/British/American spellings.
 - Keep keywords short enough for SQL LIKE matching against facility evidence text.
+- Put non-clinical wishes like large hospital, advanced equipment, or good ratings in preferences.
 - Do not invent facility names, contacts, locations, or capabilities.
 - The gold table is the only source of truth for facility facts.
 """
@@ -383,12 +433,18 @@ Rules:
         + list(parsed.get("nice_to_have") or [])
         + fallback["keywords"]
     )
+    preferences = unique_terms(
+        list(parsed.get("preferences") or [])
+        + fallback["preferences"],
+        limit=8,
+    )
 
     return {
         "city": city,
         "coords": coords,
         "care_need": parsed.get("care_need") or fallback["care_need"],
         "keywords": keywords,
+        "preferences": preferences,
         "radius_km": clamp_radius_km(parsed.get("radius_km"), default_radius_km),
         "source": "Databricks LLM planner",
     }
@@ -484,6 +540,20 @@ def has_value(value) -> bool:
         return False
     text = str(value).strip()
     return bool(text) and text.lower() not in {"null", "none", "nan", "n/a", "unknown"}
+
+
+def wants_facility_strength(preferences: list) -> bool:
+    preference_text = " ".join(str(p).lower() for p in preferences or [])
+    return any(term in preference_text for term in ["large", "larger", "big", "capacity", "doctor", "equipment"])
+
+
+def facility_strength_label(row: dict) -> str:
+    signals = []
+    if has_value(row.get("numberDoctors")):
+        signals.append(f"{row.get('numberDoctors')} doctors")
+    if has_value(row.get("capacity")):
+        signals.append(f"capacity {row.get('capacity')}")
+    return ", ".join(signals)
 
 
 def search_facilities(keywords: list, limit: int = 50):
@@ -623,6 +693,7 @@ if query:
     coords = plan["coords"]
     care_need = plan["care_need"]
     keywords = plan["keywords"]
+    preferences = plan.get("preferences", [])
     radius_km = plan["radius_km"]
 
     if not city or not coords:
@@ -630,6 +701,13 @@ if query:
     elif not keywords:
         st.warning("Could not identify searchable care terms. Try adding a specialty, service, condition, or procedure.")
     else:
+        interpreted = f"Interpreted as: {care_need} near {city}"
+        if preferences:
+            interpreted += f" · preferences: {', '.join(preferences)}"
+        st.caption(interpreted)
+        if any(p in {"advanced equipment", "good ratings"} for p in preferences):
+            st.caption("Ratings and equipment age are not in the facility table yet, so results only show evidence-backed facility details.")
+
         with st.spinner(f"Searching for {care_need} facilities near {city}…"):
             try:
                 results = search_facilities(keywords, limit=100)
@@ -657,7 +735,7 @@ if query:
             st.markdown(f"""
             <div class="no-results">
                 No {safe_care_need} facilities found within {radius_km} km of {safe_city}.<br>
-                Try expanding the radius or checking the spelling.
+                Try a shorter query like <em>orthopedic fracture surgery near {safe_city}</em>.
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -683,6 +761,11 @@ if query:
                     tags = "".join(f'<span class="evidence-tag">{html_safe(e[:140])}</span>' for e in evidence)
                     evidence_html = f'<div class="evidence-section"><div class="evidence-label">Evidence</div>{tags}</div>'
 
+                strength_html = ""
+                strength_label = facility_strength_label(r)
+                if wants_facility_strength(preferences) and strength_label:
+                    strength_html = f'<span class="signal-badge">larger facility signal: {html_safe(strength_label)}</span>'
+
                 contact_parts = []
                 for field in ["officialPhone", "phone_numbers", "email"]:
                     val = r.get(field)
@@ -697,6 +780,7 @@ if query:
                     <div class="facility-meta">{html_safe(" · ".join(meta_parts))} · {html_safe(loc_str)}</div>
                     <span class="distance-badge">{dist:.1f} km</span>
                     {confidence_badge(conf)}
+                    {strength_html}
                     {contact_html}
                     {evidence_html}
                 </div>
