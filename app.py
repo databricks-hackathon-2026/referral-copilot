@@ -1,5 +1,7 @@
 import streamlit as st
+import json
 import math
+import re
 from databricks import sql
 from databricks.sdk.core import Config, oauth_service_principal
 import os
@@ -183,6 +185,13 @@ CARE_NEEDS = {
     "pediatric":        ["pediatric", "paediatric", "children", "child", "nicu", "infant"],
 }
 
+STOPWORDS = {
+    "a", "an", "and", "around", "at", "best", "care", "center", "centre", "clinic",
+    "doctor", "doctors", "facility", "find", "for", "help", "hospital", "hospitals",
+    "in", "me", "near", "nearby", "need", "of", "please", "support", "the", "to",
+    "treatment", "with",
+}
+
 # ── Haversine ─────────────────────────────────────────────────────────────────
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -207,6 +216,184 @@ def parse_query(query: str):
             break
     return city_found, coords, care_found, keywords
 
+
+def unique_terms(terms: list, limit: int = 16) -> list:
+    cleaned = []
+    seen = set()
+    for term in terms:
+        term = re.sub(r"\s+", " ", str(term).lower()).strip()
+        term = re.sub(r"[^a-z0-9 /+-]", "", term)
+        if len(term) < 3 or term in seen:
+            continue
+        seen.add(term)
+        cleaned.append(term)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def clamp_radius_km(value, default_radius_km: int) -> int:
+    try:
+        radius = int(value)
+    except (TypeError, ValueError):
+        radius = int(default_radius_km)
+    return min(max(radius, 5), 500)
+
+
+def fallback_keywords(query: str, city: str, mapped_keywords: list) -> list:
+    city_words = set()
+    if city:
+        city_words.update(city.lower().split())
+    for city_name in CITIES:
+        if city_name in query.lower():
+            city_words.update(city_name.split())
+
+    query_terms = [
+        token
+        for token in re.findall(r"[a-z][a-z0-9+-]{2,}", query.lower())
+        if token not in STOPWORDS and token not in city_words
+    ]
+    return unique_terms(list(mapped_keywords or []) + query_terms)
+
+
+def get_search_plan_fallback(query: str, default_radius_km: int) -> dict:
+    city, coords, care_need, mapped_keywords = parse_query(query)
+    keywords = fallback_keywords(query, city, mapped_keywords)
+    if not care_need and keywords:
+        care_need = " ".join(keywords[:3])
+    if not care_need:
+        care_need = "matching"
+
+    return {
+        "city": city,
+        "coords": coords,
+        "care_need": care_need,
+        "keywords": keywords,
+        "radius_km": clamp_radius_km(default_radius_km, 50),
+        "source": "keyword fallback",
+    }
+
+
+def extract_json_object(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("Planner response did not contain a JSON object.")
+    return json.loads(text[start:end + 1])
+
+
+@st.cache_resource
+def get_workspace_client():
+    from databricks.sdk import WorkspaceClient
+
+    server_hostname = get_databricks_server_hostname()
+    client_id = os.getenv("DATABRICKS_CLIENT_ID")
+    client_secret = os.getenv("DATABRICKS_CLIENT_SECRET")
+    access_token = os.getenv("DATABRICKS_TOKEN")
+
+    if client_id and client_secret:
+        return WorkspaceClient(
+            config=Config(
+                host=f"https://{server_hostname}",
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+        )
+    if access_token:
+        return WorkspaceClient(
+            config=Config(host=f"https://{server_hostname}", token=access_token)
+        )
+
+    raise RuntimeError(
+        "Missing Databricks credentials for planner. Set DATABRICKS_CLIENT_ID and "
+        "DATABRICKS_CLIENT_SECRET for app auth, or DATABRICKS_TOKEN for local development."
+    )
+
+
+def get_search_plan_agentic(query: str, default_radius_km: int) -> dict | None:
+    endpoint = os.getenv("DATABRICKS_LLM_ENDPOINT")
+    if not endpoint:
+        return None
+
+    from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
+
+    city_names = ", ".join(sorted({city.title() for city in CITIES.keys()}))
+    prompt = f"""
+Convert this healthcare facility search into strict JSON.
+
+User query: {query}
+
+Known cities: {city_names}
+
+Return only this JSON shape:
+{{
+  "city": string or null,
+  "care_need": string or null,
+  "keywords": string[],
+  "must_have": string[],
+  "nice_to_have": string[],
+  "radius_km": number or null
+}}
+
+Rules:
+- Expand clinical synonyms and Indian/British/American spellings.
+- Keep keywords short enough for SQL LIKE matching against facility evidence text.
+- Do not invent facility names, contacts, locations, or capabilities.
+- The gold table is the only source of truth for facility facts.
+"""
+
+    response = get_workspace_client().serving_endpoints.query(
+        name=endpoint,
+        messages=[
+            ChatMessage(
+                role=ChatMessageRole.SYSTEM,
+                content="You are a careful healthcare search planner. Return valid JSON only.",
+            ),
+            ChatMessage(role=ChatMessageRole.USER, content=prompt),
+        ],
+        temperature=0.1,
+        max_tokens=500,
+    )
+    parsed = extract_json_object(response.choices[0].message.content)
+
+    fallback = get_search_plan_fallback(query, default_radius_km)
+    city = parsed.get("city") or fallback["city"]
+    coords = CITIES.get(str(city).lower()) if city else fallback["coords"]
+    if city and not coords:
+        city, coords = fallback["city"], fallback["coords"]
+
+    keywords = unique_terms(
+        list(parsed.get("keywords") or [])
+        + list(parsed.get("must_have") or [])
+        + list(parsed.get("nice_to_have") or [])
+        + fallback["keywords"]
+    )
+
+    return {
+        "city": city,
+        "coords": coords,
+        "care_need": parsed.get("care_need") or fallback["care_need"],
+        "keywords": keywords,
+        "radius_km": clamp_radius_km(parsed.get("radius_km"), default_radius_km),
+        "source": "Databricks LLM planner",
+    }
+
+
+def plan_search(query: str, default_radius_km: int) -> dict:
+    try:
+        agent_plan = get_search_plan_agentic(query, default_radius_km)
+        if agent_plan:
+            return agent_plan
+    except Exception as e:
+        st.caption(f"Planner fallback: {e}")
+
+    return get_search_plan_fallback(query, default_radius_km)
+
 # ── Databricks SQL connection ─────────────────────────────────────────────────
 def get_databricks_server_hostname():
     raw_host = os.getenv("DATABRICKS_SERVER_HOSTNAME") or os.getenv("DATABRICKS_HOST")
@@ -215,13 +402,6 @@ def get_databricks_server_hostname():
 
     parsed = urlparse(raw_host if "://" in raw_host else f"https://{raw_host}")
     return parsed.netloc or parsed.path
-
-
-def get_required_env(name):
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Missing {name}.")
-    return value
 
 
 def get_databricks_http_path():
@@ -276,14 +456,22 @@ def get_connection():
     )
 
 # ── Query gold table ──────────────────────────────────────────────────────────
+def escape_sql_like_term(term: str) -> str:
+    return term.replace("'", "''")
+
+
 def search_facilities(keywords: list, limit: int = 50):
     """Pull candidates matching any keyword across evidence columns."""
+    safe_keywords = unique_terms(keywords)
+    if not safe_keywords:
+        return []
+
     kw_conditions = " OR ".join([
-        f"(LOWER(specialties) LIKE '%{kw}%' OR "
-        f"LOWER(standardized_services) LIKE '%{kw}%' OR "
-        f"LOWER(parsed_capability) LIKE '%{kw}%' OR "
-        f"LOWER(description) LIKE '%{kw}%')"
-        for kw in keywords
+        f"(LOWER(specialties) LIKE '%{escape_sql_like_term(kw)}%' OR "
+        f"LOWER(standardized_services) LIKE '%{escape_sql_like_term(kw)}%' OR "
+        f"LOWER(parsed_capability) LIKE '%{escape_sql_like_term(kw)}%' OR "
+        f"LOWER(description) LIKE '%{escape_sql_like_term(kw)}%')"
+        for kw in safe_keywords
     ])
     query = f"""
         SELECT
@@ -359,12 +547,17 @@ with col2:
 
 # ── Search ────────────────────────────────────────────────────────────────────
 if query:
-    city, coords, care_need, keywords = parse_query(query)
+    plan = plan_search(query, radius_km)
+    city = plan["city"]
+    coords = plan["coords"]
+    care_need = plan["care_need"]
+    keywords = plan["keywords"]
+    radius_km = plan["radius_km"]
 
     if not city or not coords:
         st.warning("Could not find a city in your query. Try including a city name, e.g. 'dialysis near Jaipur'.")
-    elif not care_need or not keywords:
-        st.warning("Could not identify a care need. Try something like 'dialysis', 'emergency', 'cardiac', 'maternity'.")
+    elif not keywords:
+        st.warning("Could not identify searchable care terms. Try adding a specialty, service, condition, or procedure.")
     else:
         with st.spinner(f"Searching for {care_need} facilities near {city}…"):
             try:
