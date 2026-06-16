@@ -12,3 +12,5 @@ env:
     value: "11aa985a3f1d046f"
   - name: DATABRICKS_LLM_MODEL
     value: "gpt-oss-102b"
+  - name: GATEWAY-ACCESS_TOKEN
+    valueFrom: gateway-access-token
