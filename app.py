@@ -1,4 +1,5 @@
 import streamlit as st
+import html
 import json
 import math
 import re
@@ -460,6 +461,10 @@ def escape_sql_like_term(term: str) -> str:
     return term.replace("'", "''")
 
 
+def html_safe(value) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
 def search_facilities(keywords: list, limit: int = 50):
     """Pull candidates matching any keyword across evidence columns."""
     safe_keywords = unique_terms(keywords)
@@ -581,14 +586,17 @@ if query:
         ranked.sort(key=lambda x: x["_distance_km"])
 
         if not ranked:
+            safe_city = html_safe(city)
+            safe_care_need = html_safe(care_need)
             st.markdown(f"""
             <div class="no-results">
-                No {care_need} facilities found within {radius_km} km of {city}.<br>
+                No {safe_care_need} facilities found within {radius_km} km of {safe_city}.<br>
                 Try expanding the radius or checking the spelling.
             </div>
             """, unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="result-count">{len(ranked)} facilit{"y" if len(ranked)==1 else "ies"} found within {radius_km} km of {city}</div>', unsafe_allow_html=True)
+            safe_city = html_safe(city)
+            st.markdown(f'<div class="result-count">{len(ranked)} facilit{"y" if len(ranked)==1 else "ies"} found within {radius_km} km of {safe_city}</div>', unsafe_allow_html=True)
 
             for r in ranked[:10]:
                 dist = r["_distance_km"]
@@ -605,7 +613,7 @@ if query:
 
                 evidence_html = ""
                 if evidence:
-                    tags = "".join(f'<span class="evidence-tag">{e[:80]}</span>' for e in evidence)
+                    tags = "".join(f'<span class="evidence-tag">{html_safe(e[:80])}</span>' for e in evidence)
                     evidence_html = f'<div class="evidence-section"><div class="evidence-label">Evidence</div>{tags}</div>'
 
                 contact_parts = []
@@ -614,12 +622,12 @@ if query:
                     if val and val.strip():
                         contact_parts.append(val.strip()[:40])
                         break
-                contact_html = f'<span style="font-size:0.82rem;color:#888;">{contact_parts[0]}</span>' if contact_parts else ""
+                contact_html = f'<span style="font-size:0.82rem;color:#888;">{html_safe(contact_parts[0])}</span>' if contact_parts else ""
 
                 st.markdown(f"""
                 <div class="facility-card">
-                    <div class="facility-name">{r.get("name", "Unknown Facility")}</div>
-                    <div class="facility-meta">{" · ".join(meta_parts)} · {loc_str}</div>
+                    <div class="facility-name">{html_safe(r.get("name", "Unknown Facility"))}</div>
+                    <div class="facility-meta">{html_safe(" · ".join(meta_parts))} · {html_safe(loc_str)}</div>
                     <span class="distance-badge">{dist:.1f} km</span>
                     {confidence_badge(conf)}
                     {contact_html}
