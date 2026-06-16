@@ -267,33 +267,32 @@ def parse_query(query: str):
     return city_found, coords, care_found, keywords
 
 # ── Databricks SQL connection ─────────────────────────────────────────────────
-@st.cache_resource
-def get_connection():
-    # Databricks Apps injects DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET
-    # for OAuth M2M. If those aren't available, fall back to a PAT via
-    # DATABRICKS_TOKEN (set manually in Apps env vars as a fallback).
-    host = os.environ["DATABRICKS_HOST"]
-    http_path = "/sql/1.0/warehouses/11aa985a3f1d046f"
-    client_id = os.environ.get("DATABRICKS_CLIENT_ID")
-    client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET")
-    token = os.environ.get("DATABRICKS_TOKEN")
+def get_user_token() -> str:
+    """Extract the user's forwarded access token from Streamlit request headers."""
+    try:
+        from streamlit.web.server.websocket_headers import _get_websocket_headers
+        headers = _get_websocket_headers()
+        if headers:
+            token = headers.get("X-Forwarded-Access-Token")
+            if token:
+                return token
+    except Exception:
+        pass
+    # Fallback for local dev / if header not available
+    return os.environ.get("DATABRICKS_TOKEN", "")
 
-    if client_id and client_secret:
-        return sql.connect(
-            server_hostname=host,
-            http_path=http_path,
-            auth_type="databricks-oauth",
-            client_id=client_id,
-            client_secret=client_secret,
-        )
-    elif token:
-        return sql.connect(
-            server_hostname=host,
-            http_path=http_path,
-            access_token=token,
-        )
-    else:
-        raise ValueError("No valid auth: set DATABRICKS_TOKEN in Apps env vars")
+def get_connection():
+    """Create a new connection using the user's forwarded access token.
+    Not cached with cache_resource since each user has their own token."""
+    token = get_user_token()
+    if not token:
+        st.error("Could not retrieve access token. Please refresh the page.")
+        st.stop()
+    return sql.connect(
+        server_hostname=os.environ["DATABRICKS_HOST"],
+        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
+        access_token=token,
+    )
 
 # ── Query gold table ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
