@@ -297,15 +297,25 @@ def get_workspace_client():
     return WorkspaceClient()
 
 
-def query_llm_endpoint(endpoint: str, prompt: str) -> str:
-    url = f"https://{get_databricks_server_hostname()}/serving-endpoints/{endpoint}/invocations"
-    headers = get_workspace_client().config.authenticate()
+def get_gateway_access_token():
+    return os.getenv("GATEWAY-ACCESS_TOKEN") or os.getenv("GATEWAY_ACCESS_TOKEN")
+
+
+def query_llm_gateway(prompt: str) -> str:
+    token = get_gateway_access_token()
+    if not token:
+        raise RuntimeError("Missing GATEWAY-ACCESS_TOKEN.")
+
+    model = os.getenv("DATABRICKS_LLM_MODEL", "gpt-oss-102b")
+    url = f"https://{get_databricks_server_hostname()}/ai-gateway/mlflow/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {token}"}
     headers["Content-Type"] = "application/json"
 
     response = requests.post(
         url,
         headers=headers,
         json={
+            "model": model,
             "messages": [
                 {
                     "role": "system",
@@ -314,7 +324,7 @@ def query_llm_endpoint(endpoint: str, prompt: str) -> str:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 500,
+            "max_tokens": 1024,
         },
         timeout=30,
     )
@@ -324,8 +334,7 @@ def query_llm_endpoint(endpoint: str, prompt: str) -> str:
 
 
 def get_search_plan_agentic(query: str, default_radius_km: int) -> dict | None:
-    endpoint = os.getenv("DATABRICKS_LLM_ENDPOINT")
-    if not endpoint:
+    if not get_gateway_access_token():
         return None
 
     city_names = ", ".join(sorted({city.title() for city in CITIES.keys()}))
@@ -353,7 +362,7 @@ Rules:
 - The gold table is the only source of truth for facility facts.
 """
 
-    parsed = extract_json_object(query_llm_endpoint(endpoint, prompt))
+    parsed = extract_json_object(query_llm_gateway(prompt))
 
     fallback = get_search_plan_fallback(query, default_radius_km)
     city = parsed.get("city") or fallback["city"]
