@@ -233,7 +233,11 @@ def get_databricks_http_path():
     if warehouse_id:
         return f"/sql/1.0/warehouses/{warehouse_id}"
 
-    raise RuntimeError("Missing DATABRICKS_HTTP_PATH or DATABRICKS_WAREHOUSE_ID.")
+    raise RuntimeError(
+        "Missing SQL warehouse configuration. In app.yaml, set "
+        "DATABRICKS_WAREHOUSE_ID from a SQL warehouse resource key, or set "
+        "DATABRICKS_HTTP_PATH to /sql/1.0/warehouses/<warehouse-id>."
+    )
 
 
 @st.cache_resource
