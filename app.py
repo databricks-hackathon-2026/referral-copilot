@@ -192,7 +192,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 # ── Geo lookup from PIN directory ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
-def lookup_location_from_db(location_text: str, token: str = ""):
+def lookup_location_from_db(location_text: str):
     """
     Fallback geo lookup against referral_copilot_pincode_district_lookup.
     Handles:
@@ -202,11 +202,7 @@ def lookup_location_from_db(location_text: str, token: str = ""):
     """
     loc = location_text.strip()
     try:
-        conn = sql.connect(
-                server_hostname=os.environ["DATABRICKS_HOST"],
-                http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
-                access_token=token,
-            )
+        conn = get_sp_connection()
         with conn.cursor() as cur:
             if loc.isdigit() and len(loc) == 6:
                 # PIN code lookup
@@ -266,8 +262,7 @@ def parse_query(query: str):
 
     # 2. Fallback: PIN code or district name lookup against pincode_district_lookup
     if not coords and location_text:
-        token = st.context.headers.get("X-Forwarded-Access-Token", "")
-        city_found, coords = lookup_location_from_db(location_text, token)
+        city_found, coords = lookup_location_from_db(location_text)
 
     return city_found, coords, care_found, keywords
 
@@ -286,9 +281,20 @@ def get_connection():
     )
 
 # ── Query gold table ──────────────────────────────────────────────────────────
+@st.cache_resource
+def get_sp_connection():
+    """Connect using service principal credentials (auto-injected by Databricks Apps)."""
+    return sql.connect(
+        server_hostname=os.environ["DATABRICKS_HOST"],
+        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
+        auth_type="databricks-oauth",
+        client_id=os.environ["DATABRICKS_CLIENT_ID"],
+        client_secret=os.environ["DATABRICKS_CLIENT_SECRET"],
+    )
+
 @st.cache_data(ttl=300)
-def _run_facility_query(keywords: list, token: str, limit: int = 50):
-    """Cached query -- token passed explicitly so cache key includes auth context."""
+def _run_facility_query(keywords: tuple, limit: int = 50):
+    """Cached facility search using service principal connection."""
     kw_conditions = " OR ".join([
         f"(LOWER(specialties) LIKE '%{kw}%' OR "
         f"LOWER(standardized_services) LIKE '%{kw}%' OR "
@@ -312,20 +318,14 @@ def _run_facility_query(keywords: list, token: str, limit: int = 50):
           AND ({kw_conditions})
         LIMIT {limit}
     """
-    conn = sql.connect(
-        server_hostname=os.environ["DATABRICKS_HOST"],
-        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
-        access_token=token,
-    )
+    conn = get_sp_connection()
     with conn.cursor() as cur:
         cur.execute(query)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 def search_facilities(keywords: list, limit: int = 50):
-    """Get user token from request context, then run cached query."""
-    token = st.context.headers.get("X-Forwarded-Access-Token", "")
-    return _run_facility_query(tuple(keywords), token, limit)
+    return _run_facility_query(tuple(keywords), limit)
 
 # ── Confidence badge ──────────────────────────────────────────────────────────
 def confidence_badge(level):
