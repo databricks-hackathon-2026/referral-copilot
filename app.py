@@ -401,7 +401,9 @@ if query:
             try:
                 results = search_facilities(keywords, limit=100)
             except Exception as e:
-                st.error(f"Database error: {e}")
+                import traceback
+                st.error(f"Database error: {type(e).__name__}: {e}")
+                st.code(traceback.format_exc())
                 results = []
 
         # Filter and rank by distance
