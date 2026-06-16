@@ -1,7 +1,9 @@
 import streamlit as st
 import math
 from databricks import sql
+from databricks.sdk.core import Config, oauth_service_principal
 import os
+from urllib.parse import urlparse
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -190,111 +192,76 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return 2*R*math.asin(math.sqrt(a))
 
-# ── Geo lookup from PIN directory ─────────────────────────────────────────────
-@st.cache_data(ttl=3600)
-def lookup_location_from_db(location_text: str):
-    """
-    Fallback geo lookup against referral_copilot_pincode_district_lookup.
-    Handles:
-      - 6-digit PIN code (exact match on pincode column)
-      - District/city name (LIKE match on district column)
-    Returns (location_label, (lat, lon)) or (None, None).
-    """
-    loc = location_text.strip()
-    try:
-        conn = get_sp_connection()
-        with conn.cursor() as cur:
-            if loc.isdigit() and len(loc) == 6:
-                # PIN code lookup
-                cur.execute(f"""
-                    SELECT district, statename, latitude, longitude
-                    FROM workspace.default.referral_copilot_pincode_district_lookup
-                    WHERE pincode = '{loc}'
-                    AND has_coordinates = true
-                    LIMIT 1
-                """)
-            else:
-                # District name fuzzy lookup
-                cur.execute(f"""
-                    SELECT district, statename, latitude, longitude
-                    FROM workspace.default.referral_copilot_pincode_district_lookup
-                    WHERE UPPER(district) LIKE UPPER('%{loc}%')
-                    AND has_coordinates = true
-                    LIMIT 1
-                """)
-            row = cur.fetchone()
-            if row and row[2] and row[3]:
-                label = f"{row[0].title()}, {row[1].title()}"
-                return label, (float(row[2]), float(row[3]))
-    except Exception:
-        pass
-    return None, None
-
 # ── Parse query ───────────────────────────────────────────────────────────────
 def parse_query(query: str):
     q = query.lower().strip()
-
-    # Care need detection
-    care_found, keywords = None, []
-    for care, kws in CARE_NEEDS.items():
-        if any(kw in q for kw in kws) or care in q:
-            care_found, keywords = care, kws
-            break
-
-    # Location detection: strip care-need words to isolate location text
-    location_text = q
-    for strip_word in ["near", "in", "around", "close to"]:
-        if strip_word in location_text:
-            location_text = location_text.split(strip_word, 1)[-1].strip()
-            break
-    # Also strip care-need keywords from location text
-    if care_found:
-        location_text = location_text.replace(care_found, "").strip()
-        for kw in keywords:
-            location_text = location_text.replace(kw, "").strip()
-
-    # 1. Try hardcoded gazetteer first (fastest, no DB call)
     city_found, coords = None, None
     for city, latlon in CITIES.items():
         if city in q:
             city_found, coords = city.title(), latlon
             break
-
-    # 2. Fallback: PIN code or district name lookup against pincode_district_lookup
-    if not coords and location_text:
-        city_found, coords = lookup_location_from_db(location_text)
-
+    care_found, keywords = None, []
+    for care, kws in CARE_NEEDS.items():
+        if any(kw in q for kw in kws) or care in q:
+            care_found, keywords = care, kws
+            break
     return city_found, coords, care_found, keywords
 
 # ── Databricks SQL connection ─────────────────────────────────────────────────
+def get_databricks_server_hostname():
+    raw_host = os.getenv("DATABRICKS_SERVER_HOSTNAME") or os.getenv("DATABRICKS_HOST")
+    if not raw_host:
+        raise RuntimeError("Missing DATABRICKS_HOST or DATABRICKS_SERVER_HOSTNAME.")
+
+    parsed = urlparse(raw_host if "://" in raw_host else f"https://{raw_host}")
+    return parsed.netloc or parsed.path
+
+
+def get_required_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing {name}.")
+    return value
+
+
+@st.cache_resource
 def get_connection():
-    """Connect to the SQL warehouse using the user's forwarded access token.
-    Databricks Apps injects X-Forwarded-Access-Token via st.context.headers."""
-    user_token = st.context.headers.get("X-Forwarded-Access-Token")
-    if not user_token:
-        st.error("Authentication failed. Please refresh the page.")
-        st.stop()
+    server_hostname = get_databricks_server_hostname()
+    http_path = get_required_env("DATABRICKS_HTTP_PATH")
+    client_id = os.getenv("DATABRICKS_CLIENT_ID")
+    client_secret = os.getenv("DATABRICKS_CLIENT_SECRET")
+
+    if client_id and client_secret:
+        def credential_provider():
+            config = Config(
+                host=f"https://{server_hostname}",
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+            return oauth_service_principal(config)
+
+        return sql.connect(
+            server_hostname=server_hostname,
+            http_path=http_path,
+            credentials_provider=credential_provider,
+        )
+
+    access_token = os.getenv("DATABRICKS_TOKEN")
+    if not access_token:
+        raise RuntimeError(
+            "Missing Databricks credentials. Set DATABRICKS_CLIENT_ID and "
+            "DATABRICKS_CLIENT_SECRET for app auth, or DATABRICKS_TOKEN for local development."
+        )
+
     return sql.connect(
-        server_hostname=os.environ["DATABRICKS_HOST"],
-        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
-        access_token=user_token,
+        server_hostname=server_hostname,
+        http_path=http_path,
+        access_token=access_token,
     )
 
 # ── Query gold table ──────────────────────────────────────────────────────────
-@st.cache_resource
-def get_sp_connection():
-    """Connect using service principal credentials (auto-injected by Databricks Apps)."""
-    return sql.connect(
-        server_hostname=os.environ["DATABRICKS_HOST"],
-        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
-        auth_type="databricks-oauth",
-        client_id=os.environ["DATABRICKS_CLIENT_ID"],
-        client_secret=os.environ["DATABRICKS_CLIENT_SECRET"],
-    )
-
-@st.cache_data(ttl=300)
-def _run_facility_query(keywords: tuple, limit: int = 50):
-    """Cached facility search using service principal connection."""
+def search_facilities(keywords: list, limit: int = 50):
+    """Pull candidates matching any keyword across evidence columns."""
     kw_conditions = " OR ".join([
         f"(LOWER(specialties) LIKE '%{kw}%' OR "
         f"LOWER(standardized_services) LIKE '%{kw}%' OR "
@@ -318,14 +285,11 @@ def _run_facility_query(keywords: tuple, limit: int = 50):
           AND ({kw_conditions})
         LIMIT {limit}
     """
-    conn = get_sp_connection()
+    conn = get_connection()
     with conn.cursor() as cur:
         cur.execute(query)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-def search_facilities(keywords: list, limit: int = 50):
-    return _run_facility_query(tuple(keywords), limit)
 
 # ── Confidence badge ──────────────────────────────────────────────────────────
 def confidence_badge(level):
@@ -357,17 +321,6 @@ def extract_evidence(row: dict, keywords: list) -> list:
     return snippets
 
 # ── Header ────────────────────────────────────────────────────────────────────
-# DEBUG: show available headers (remove before final demo)
-with st.expander("🔧 Debug: Auth Headers", expanded=False):
-    try:
-        headers = dict(st.context.headers)
-        relevant = {k: v[:20]+"..." if len(str(v)) > 20 else v 
-                   for k, v in headers.items() 
-                   if any(x in k.lower() for x in ["forward", "auth", "token", "email", "user"])}
-        st.json(relevant if relevant else {"note": "no forwarded headers found", "all_keys": list(headers.keys())})
-    except Exception as e:
-        st.write(f"Error reading headers: {e}")
-
 st.markdown("""
 <div class="sos-header">
     <div class="sos-wordmark">SOS</div>
@@ -401,9 +354,7 @@ if query:
             try:
                 results = search_facilities(keywords, limit=100)
             except Exception as e:
-                import traceback
-                st.error(f"Database error: {type(e).__name__}: {e}")
-                st.code(traceback.format_exc())
+                st.error(f"Database error: {e}")
                 results = []
 
         # Filter and rank by distance
