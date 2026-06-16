@@ -300,6 +300,13 @@ def get_workspace_client():
 def query_llm_endpoint(endpoint: str, prompt: str) -> str:
     url = f"https://{get_databricks_server_hostname()}/serving-endpoints/{endpoint}/invocations"
     headers = get_workspace_client().config.authenticate()
+    user_token = None
+    try:
+        user_token = st.context.headers.get("x-forwarded-access-token")
+    except Exception:
+        user_token = None
+    if user_token:
+        headers["Authorization"] = f"Bearer {user_token}"
     headers["Content-Type"] = "application/json"
 
     response = requests.post(
