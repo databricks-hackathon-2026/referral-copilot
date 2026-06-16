@@ -3,15 +3,6 @@ import math
 from databricks import sql
 import os
 
-# Debug: check which env vars are available
-missing = []
-for var in ["DATABRICKS_HOST", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET"]:
-    if not os.environ.get(var):
-        missing.append(var)
-if missing:
-    st.error(f"Missing environment variables: {missing}")
-    st.stop()
-    
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="SOS · Source of Support",
@@ -199,19 +190,79 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return 2*R*math.asin(math.sqrt(a))
 
+# ── Geo lookup from PIN directory ─────────────────────────────────────────────
+def lookup_location_from_db(location_text: str):
+    """
+    Fallback geo lookup against referral_copilot_pincode_district_lookup.
+    Handles:
+      - 6-digit PIN code (exact match on pincode column)
+      - District/city name (LIKE match on district column)
+    Returns (location_label, (lat, lon)) or (None, None).
+    """
+    loc = location_text.strip()
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            if loc.isdigit() and len(loc) == 6:
+                # PIN code lookup
+                cur.execute(f"""
+                    SELECT district, statename, latitude, longitude
+                    FROM workspace.default.referral_copilot_pincode_district_lookup
+                    WHERE pincode = '{loc}'
+                    AND has_coordinates = true
+                    LIMIT 1
+                """)
+            else:
+                # District name fuzzy lookup
+                cur.execute(f"""
+                    SELECT district, statename, latitude, longitude
+                    FROM workspace.default.referral_copilot_pincode_district_lookup
+                    WHERE UPPER(district) LIKE UPPER('%{loc}%')
+                    AND has_coordinates = true
+                    LIMIT 1
+                """)
+            row = cur.fetchone()
+            if row and row[2] and row[3]:
+                label = f"{row[0].title()}, {row[1].title()}"
+                return label, (float(row[2]), float(row[3]))
+    except Exception:
+        pass
+    return None, None
+
 # ── Parse query ───────────────────────────────────────────────────────────────
 def parse_query(query: str):
     q = query.lower().strip()
-    city_found, coords = None, None
-    for city, latlon in CITIES.items():
-        if city in q:
-            city_found, coords = city.title(), latlon
-            break
+
+    # Care need detection
     care_found, keywords = None, []
     for care, kws in CARE_NEEDS.items():
         if any(kw in q for kw in kws) or care in q:
             care_found, keywords = care, kws
             break
+
+    # Location detection: strip care-need words to isolate location text
+    location_text = q
+    for strip_word in ["near", "in", "around", "close to"]:
+        if strip_word in location_text:
+            location_text = location_text.split(strip_word, 1)[-1].strip()
+            break
+    # Also strip care-need keywords from location text
+    if care_found:
+        location_text = location_text.replace(care_found, "").strip()
+        for kw in keywords:
+            location_text = location_text.replace(kw, "").strip()
+
+    # 1. Try hardcoded gazetteer first (fastest, no DB call)
+    city_found, coords = None, None
+    for city, latlon in CITIES.items():
+        if city in q:
+            city_found, coords = city.title(), latlon
+            break
+
+    # 2. Fallback: PIN code or district name lookup against pincode_district_lookup
+    if not coords and location_text:
+        city_found, coords = lookup_location_from_db(location_text)
+
     return city_found, coords, care_found, keywords
 
 # ── Databricks SQL connection ─────────────────────────────────────────────────
