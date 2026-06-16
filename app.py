@@ -3,6 +3,7 @@ import html
 import json
 import math
 import re
+import requests
 from databricks import sql
 from databricks.sdk.core import Config, oauth_service_principal
 import os
@@ -292,36 +293,39 @@ def extract_json_object(text: str) -> dict:
 def get_workspace_client():
     from databricks.sdk import WorkspaceClient
 
-    server_hostname = get_databricks_server_hostname()
-    client_id = os.getenv("DATABRICKS_CLIENT_ID")
-    client_secret = os.getenv("DATABRICKS_CLIENT_SECRET")
-    access_token = os.getenv("DATABRICKS_TOKEN")
+    return WorkspaceClient()
 
-    if client_id and client_secret:
-        return WorkspaceClient(
-            config=Config(
-                host=f"https://{server_hostname}",
-                client_id=client_id,
-                client_secret=client_secret,
-            )
-        )
-    if access_token:
-        return WorkspaceClient(
-            config=Config(host=f"https://{server_hostname}", token=access_token)
-        )
 
-    raise RuntimeError(
-        "Missing Databricks credentials for planner. Set DATABRICKS_CLIENT_ID and "
-        "DATABRICKS_CLIENT_SECRET for app auth, or DATABRICKS_TOKEN for local development."
+def query_llm_endpoint(endpoint: str, prompt: str) -> str:
+    url = f"https://{get_databricks_server_hostname()}/serving-endpoints/{endpoint}/invocations"
+    headers = get_workspace_client().config.authenticate()
+    headers["Content-Type"] = "application/json"
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json={
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a careful healthcare search planner. Return valid JSON only.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 500,
+        },
+        timeout=30,
     )
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
 
 
 def get_search_plan_agentic(query: str, default_radius_km: int) -> dict | None:
     endpoint = os.getenv("DATABRICKS_LLM_ENDPOINT")
     if not endpoint:
         return None
-
-    from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
     city_names = ", ".join(sorted({city.title() for city in CITIES.keys()}))
     prompt = f"""
@@ -348,19 +352,7 @@ Rules:
 - The gold table is the only source of truth for facility facts.
 """
 
-    response = get_workspace_client().serving_endpoints.query(
-        name=endpoint,
-        messages=[
-            ChatMessage(
-                role=ChatMessageRole.SYSTEM,
-                content="You are a careful healthcare search planner. Return valid JSON only.",
-            ),
-            ChatMessage(role=ChatMessageRole.USER, content=prompt),
-        ],
-        temperature=0.1,
-        max_tokens=500,
-    )
-    parsed = extract_json_object(response.choices[0].message.content)
+    parsed = extract_json_object(query_llm_endpoint(endpoint, prompt))
 
     fallback = get_search_plan_fallback(query, default_radius_km)
     city = parsed.get("city") or fallback["city"]
@@ -390,8 +382,8 @@ def plan_search(query: str, default_radius_km: int) -> dict:
         agent_plan = get_search_plan_agentic(query, default_radius_km)
         if agent_plan:
             return agent_plan
-    except Exception as e:
-        st.caption(f"Planner fallback: {e}")
+    except Exception:
+        st.caption("Planner unavailable; using keyword fallback.")
 
     return get_search_plan_fallback(query, default_radius_km)
 
