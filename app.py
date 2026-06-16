@@ -183,7 +183,7 @@ CARE_NEEDS = {
     "cancer":           ["cancer", "oncology", "chemotherapy", "radiation", "tumour", "tumor"],
     "orthopedic":       ["orthopedic", "orthopaedic", "fracture", "joint replacement", "spine", "bone"],
     "eye":              ["eye", "ophthalmology", "cataract", "retina", "glaucoma", "vision"],
-    "dental":           ["dental", "dentistry", "teeth", "oral", "tooth"],
+    "dental":           ["dental", "dentist", "dentistry", "teeth", "oral", "tooth"],
     "neurology":        ["neurology", "neuro", "brain", "stroke", "seizure", "epilepsy"],
     "pediatric":        ["pediatric", "paediatric", "children", "child", "nicu", "infant"],
 }
@@ -479,6 +479,13 @@ def html_safe(value) -> str:
     return html.escape(str(value or ""), quote=True)
 
 
+def has_value(value) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return bool(text) and text.lower() not in {"null", "none", "nan", "n/a", "unknown"}
+
+
 def search_facilities(keywords: list, limit: int = 50):
     """Pull candidates matching any keyword across evidence columns."""
     safe_keywords = unique_terms(keywords)
@@ -526,11 +533,55 @@ def confidence_badge(level):
     return f'<span class="confidence-badge {css}">📍 {label}</span>'
 
 # ── Evidence snippets ─────────────────────────────────────────────────────────
+def humanize_camel_case(value: str) -> str:
+    value = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value)
+    return value[:1].upper() + value[1:]
+
+
 def clean_evidence_text(value: str) -> str:
     value = re.sub(r"\s+", " ", str(value or "")).strip()
     value = value.strip("[]{}()")
     value = value.strip(",;:.\"'")
-    return value
+    return humanize_camel_case(value)
+
+
+def evidence_items(value: str) -> list:
+    text = str(value or "").strip()
+    if not text:
+        return []
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [clean_evidence_text(item) for item in parsed if clean_evidence_text(item)]
+        if isinstance(parsed, dict):
+            return [clean_evidence_text(item) for item in parsed.values() if clean_evidence_text(item)]
+    except Exception:
+        pass
+
+    parts = re.split(r'["\']?\s*,\s*["\']?', text.strip("[]"))
+    return [clean_evidence_text(part) for part in parts if clean_evidence_text(part)]
+
+
+def matched_evidence_text(value: str, keyword: str, field: str) -> str:
+    if field in {"specialties", "standardized_services", "parsed_capability"}:
+        matches = [
+            item
+            for item in evidence_items(value)
+            if keyword.lower() in item.lower()
+        ]
+        if matches:
+            return ", ".join(matches[:3])
+
+    idx = str(value).lower().find(keyword.lower())
+    start = max(0, idx - 36)
+    end = min(len(str(value)), idx + 84)
+    excerpt = clean_evidence_text(str(value)[start:end])
+    if start > 0:
+        excerpt = f"...{excerpt}"
+    if end < len(str(value)):
+        excerpt = f"{excerpt}..."
+    return excerpt
 
 
 def extract_evidence(row: dict, keywords: list) -> list:
@@ -539,15 +590,7 @@ def extract_evidence(row: dict, keywords: list) -> list:
         val = row.get(field) or ""
         for kw in keywords:
             if kw.lower() in val.lower():
-                # Find a short excerpt around the keyword
-                idx = val.lower().find(kw.lower())
-                start = max(0, idx - 36)
-                end = min(len(val), idx + 84)
-                excerpt = clean_evidence_text(val[start:end])
-                if start > 0:
-                    excerpt = f"...{excerpt}"
-                if end < len(val):
-                    excerpt = f"{excerpt}..."
+                excerpt = matched_evidence_text(val, kw, field)
                 label = EVIDENCE_FIELD_LABELS.get(field, "Matched evidence")
                 snippet = f"{label}: {excerpt}"
                 if excerpt and snippet not in snippets:
@@ -635,8 +678,8 @@ if query:
                 capacity = r.get("capacity")
 
                 meta_parts = [r.get("organization_type") or "Healthcare Facility"]
-                if doctors: meta_parts.append(f"{doctors} doctors")
-                if capacity: meta_parts.append(f"capacity {capacity}")
+                if has_value(doctors): meta_parts.append(f"{doctors} doctors")
+                if has_value(capacity): meta_parts.append(f"capacity {capacity}")
 
                 evidence_html = ""
                 if evidence:
@@ -646,8 +689,8 @@ if query:
                 contact_parts = []
                 for field in ["officialPhone", "phone_numbers", "email"]:
                     val = r.get(field)
-                    if val and val.strip():
-                        contact_parts.append(val.strip()[:40])
+                    if has_value(val):
+                        contact_parts.append(str(val).strip()[:40])
                         break
                 contact_html = f'<span style="font-size:0.82rem;color:#888;">{html_safe(contact_parts[0])}</span>' if contact_parts else ""
 
