@@ -638,9 +638,38 @@ def humanize_camel_case(value: str) -> str:
 
 def clean_evidence_text(value: str) -> str:
     value = re.sub(r"\s+", " ", str(value or "")).strip()
+    value = re.sub(r"^[\"']?\w+[\"']?\s*:\s*[\"']?", "", value)
+    value = re.sub(r"\bcapability_name\b", "Capability", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bstandardized_service_name\b", "Service", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bspecialty_name\b", "Specialty", value, flags=re.IGNORECASE)
     value = value.strip("[]{}()")
     value = value.strip(",;:.\"'")
     return humanize_camel_case(value)
+
+
+def clean_phone(value: str) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"\+?\d[\d\s().-]{7,}\d", text)
+    return match.group(0).strip() if match else text[:40]
+
+
+def dict_like_value(text: str, preferred_keys: list) -> str | None:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return None
+
+    normalized = cleaned.replace("&#x27;", "'").replace("&quot;", '"')
+    for key in preferred_keys:
+        patterns = [
+            rf'"{re.escape(key)}"\s*:\s*"([^"]+)"',
+            rf"'{re.escape(key)}'\s*:\s*'([^']+)'",
+            rf"{re.escape(key)}\s*:\s*([^,}}]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                return clean_evidence_text(match.group(1))
+    return None
 
 
 def evidence_items(value: str) -> list:
@@ -651,11 +680,24 @@ def evidence_items(value: str) -> list:
     try:
         parsed = json.loads(text)
         if isinstance(parsed, list):
-            return [clean_evidence_text(item) for item in parsed if clean_evidence_text(item)]
+            items = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    item = item.get("capability_name") or item.get("standardized_service_name") or item.get("specialty_name") or item.get("name") or item.get("description")
+                cleaned = clean_evidence_text(item)
+                if cleaned:
+                    items.append(cleaned)
+            return items
         if isinstance(parsed, dict):
-            return [clean_evidence_text(item) for item in parsed.values() if clean_evidence_text(item)]
+            item = parsed.get("capability_name") or parsed.get("standardized_service_name") or parsed.get("specialty_name") or parsed.get("name") or parsed.get("description")
+            cleaned = clean_evidence_text(item)
+            return [cleaned] if cleaned else []
     except Exception:
         pass
+
+    dict_value = dict_like_value(text, ["capability_name", "standardized_service_name", "specialty_name", "name", "description"])
+    if dict_value:
+        return [dict_value]
 
     parts = re.split(r'["\']?\s*,\s*["\']?', text.strip("[]"))
     return [clean_evidence_text(part) for part in parts if clean_evidence_text(part)]
@@ -838,35 +880,30 @@ if query:
                 if has_value(doctors): meta_parts.append(f"{doctors} doctors")
                 if has_value(capacity): meta_parts.append(f"capacity {capacity}")
 
-                evidence_html = ""
-                if evidence:
-                    tags = "".join(f'<span class="evidence-tag">{html_safe(e[:140])}</span>' for e in evidence)
-                    evidence_html = f'<div class="evidence-section"><div class="evidence-label">Evidence</div>{tags}</div>'
-
-                strength_html = ""
                 strength_label = facility_strength_label(r)
-                if wants_facility_strength(preferences) and strength_label:
-                    strength_html = f'<span class="signal-badge">larger facility signal: {html_safe(strength_label)}</span>'
 
                 contact_parts = []
                 for field in ["officialPhone", "phone_numbers", "email"]:
                     val = r.get(field)
                     if has_value(val):
-                        contact_parts.append(str(val).strip()[:40])
+                        contact_parts.append(clean_phone(val))
                         break
-                contact_html = f'<span style="font-size:0.82rem;color:#888;">{html_safe(contact_parts[0])}</span>' if contact_parts else ""
 
-                st.markdown(f"""
-                <div class="facility-card">
-                    <div class="facility-name">{html_safe(r.get("name", "Unknown Facility"))}</div>
-                    <div class="facility-meta">{html_safe(" · ".join(meta_parts))} · {html_safe(loc_str)}</div>
-                    <span class="distance-badge">{dist:.1f} km</span>
-                    {confidence_badge(conf)}
-                    {strength_html}
-                    {contact_html}
-                    {evidence_html}
-                </div>
-                """, unsafe_allow_html=True)
+                with st.container(border=True):
+                    st.markdown(f"#### {html_safe(r.get('name', 'Unknown Facility'))}")
+                    st.caption(f"{' · '.join(meta_parts)} · {loc_str}")
+
+                    badge_html = f'<span class="distance-badge">{dist:.1f} km</span>{confidence_badge(conf)}'
+                    if wants_facility_strength(preferences) and strength_label:
+                        badge_html += f'<span class="signal-badge">larger facility signal: {html_safe(strength_label)}</span>'
+                    if contact_parts:
+                        badge_html += f'<span style="font-size:0.82rem;color:#888;">{html_safe(contact_parts[0])}</span>'
+                    st.markdown(badge_html, unsafe_allow_html=True)
+
+                    if evidence:
+                        st.markdown('<div class="evidence-label">Evidence</div>', unsafe_allow_html=True)
+                        for item in evidence:
+                            st.markdown(f'<span class="evidence-tag">{html_safe(item[:140])}</span>', unsafe_allow_html=True)
 
 else:
     st.markdown("""
