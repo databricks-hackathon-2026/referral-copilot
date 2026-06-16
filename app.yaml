@@ -10,3 +10,5 @@ command:
 env:
   - name: DATABRICKS_WAREHOUSE_ID
     value: "11aa985a3f1d046f"
+  - name: DATABRICKS_LLM_ENDPOINT
+    value: "sos-hackathon"
