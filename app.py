@@ -608,17 +608,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Search input ──────────────────────────────────────────────────────────────
-col1, col2 = st.columns([4, 1])
-with col1:
-    st.markdown('<div class="search-label">What do you need, and where?</div>', unsafe_allow_html=True)
-    query = st.text_input(
-        label="query",
-        placeholder='e.g. "dialysis near Jaipur" or "emergency surgery near Patna"',
-        label_visibility="collapsed",
-    )
-with col2:
-    st.markdown('<div class="search-label">&nbsp;</div>', unsafe_allow_html=True)
-    radius_km = st.selectbox("Radius", [25, 50, 100, 200], index=1, label_visibility="collapsed")
+st.markdown('<div class="search-label">What do you need, and where?</div>', unsafe_allow_html=True)
+query = st.text_input(
+    label="query",
+    placeholder='e.g. "dialysis near Jaipur" or "emergency surgery near Patna"',
+    label_visibility="collapsed",
+)
+radius_km = 50
 
 # ── Search ────────────────────────────────────────────────────────────────────
 if query:
@@ -666,9 +662,10 @@ if query:
             """, unsafe_allow_html=True)
         else:
             safe_city = html_safe(city)
-            st.markdown(f'<div class="result-count">{len(ranked)} facilit{"y" if len(ranked)==1 else "ies"} found within {radius_km} km of {safe_city}</div>', unsafe_allow_html=True)
+            shown_count = min(len(ranked), 5)
+            st.markdown(f'<div class="result-count">Showing the {shown_count} nearest of {len(ranked)} facilit{"y" if len(ranked)==1 else "ies"} within {radius_km} km of {safe_city}</div>', unsafe_allow_html=True)
 
-            for r in ranked[:10]:
+            for r in ranked[:5]:
                 dist = r["_distance_km"]
                 loc_parts = [p for p in [r.get("district") or r.get("address_city"), r.get("state") or r.get("address_stateOrRegion")] if p]
                 loc_str = ", ".join(loc_parts) if loc_parts else "Location on file"
