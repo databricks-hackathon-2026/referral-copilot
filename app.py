@@ -3,6 +3,15 @@ import math
 from databricks import sql
 import os
 
+# Debug: check which env vars are available
+missing = []
+for var in ["DATABRICKS_HOST", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET"]:
+    if not os.environ.get(var):
+        missing.append(var)
+if missing:
+    st.error(f"Missing environment variables: {missing}")
+    st.stop()
+    
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="SOS · Source of Support",
