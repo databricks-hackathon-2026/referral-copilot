@@ -269,12 +269,31 @@ def parse_query(query: str):
 # ── Databricks SQL connection ─────────────────────────────────────────────────
 @st.cache_resource
 def get_connection():
-    return sql.connect(
-        server_hostname=os.environ["DATABRICKS_HOST"],
-        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
-        client_id=os.environ["DATABRICKS_CLIENT_ID"],
-        client_secret=os.environ["DATABRICKS_CLIENT_SECRET"],
-    )
+    # Databricks Apps injects DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET
+    # for OAuth M2M. If those aren't available, fall back to a PAT via
+    # DATABRICKS_TOKEN (set manually in Apps env vars as a fallback).
+    host = os.environ["DATABRICKS_HOST"]
+    http_path = "/sql/1.0/warehouses/11aa985a3f1d046f"
+    client_id = os.environ.get("DATABRICKS_CLIENT_ID")
+    client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET")
+    token = os.environ.get("DATABRICKS_TOKEN")
+
+    if client_id and client_secret:
+        return sql.connect(
+            server_hostname=host,
+            http_path=http_path,
+            auth_type="databricks-oauth",
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+    elif token:
+        return sql.connect(
+            server_hostname=host,
+            http_path=http_path,
+            access_token=token,
+        )
+    else:
+        raise ValueError("No valid auth: set DATABRICKS_TOKEN in Apps env vars")
 
 # ── Query gold table ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
