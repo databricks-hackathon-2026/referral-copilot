@@ -682,18 +682,68 @@ def matched_evidence_text(value: str, keyword: str, field: str) -> str:
     return excerpt
 
 
-def extract_evidence(row: dict, keywords: list) -> list:
+def row_search_text(row: dict) -> str:
+    fields = ["name", "organization_type", "specialties", "standardized_services", "parsed_capability", "description"]
+    return " ".join(str(row.get(field) or "").lower() for field in fields)
+
+
+def is_orthopedic_query(care_need: str, keywords: list) -> bool:
+    text = " ".join([str(care_need or "")] + [str(kw) for kw in keywords]).lower()
+    return any(term in text for term in ["orthopedic", "orthopaedic", "fracture", "hand surgery"])
+
+
+def relevance_score(row: dict, care_need: str, keywords: list) -> int:
+    text = row_search_text(row)
+    score = 0
+
+    if is_orthopedic_query(care_need, keywords):
+        if "orthopedic" in text or "orthopaedic" in text:
+            score += 8
+        if "fracture" in text:
+            score += 5
+        if "trauma" in text:
+            score += 4
+        if "hand surgery" in text:
+            score += 4
+        if "surgery" in text or "surgical" in text:
+            score += 1
+        if ("dental" in text or "oral" in text or "maxillofacial" in text) and score < 8:
+            score -= 8
+    else:
+        for kw in keywords:
+            if kw.lower() in text:
+                score += 1
+
+    if has_value(row.get("numberDoctors")):
+        score += 1
+    if has_value(row.get("capacity")):
+        score += 1
+    return score
+
+
+def extract_evidence(row: dict, keywords: list, care_need: str = "") -> list:
     snippets = []
+    if is_orthopedic_query(care_need, keywords):
+        evidence_keywords = [
+            "orthopedic", "orthopaedic", "orthopedics", "orthopaedics",
+            "fracture", "trauma", "hand surgery", "surgery",
+        ]
+    else:
+        evidence_keywords = keywords
+
     for field in ["specialties", "standardized_services", "parsed_capability", "description"]:
         val = row.get(field) or ""
-        for kw in keywords:
+        seen_excerpts = set()
+        for kw in evidence_keywords:
             if kw.lower() in val.lower():
                 excerpt = matched_evidence_text(val, kw, field)
                 label = EVIDENCE_FIELD_LABELS.get(field, "Matched evidence")
                 snippet = f"{label}: {excerpt}"
-                if excerpt and snippet not in snippets:
+                normalized_excerpt = re.sub(r"\W+", "", excerpt.lower())
+                if excerpt and normalized_excerpt not in seen_excerpts and snippet not in snippets:
+                    seen_excerpts.add(normalized_excerpt)
                     snippets.append(snippet)
-                if len(snippets) >= 4:
+                if len(snippets) >= 3:
                     return snippets
     return snippets
 
@@ -751,11 +801,15 @@ if query:
                 dist = haversine_km(anchor_lat, anchor_lon, r["facility_latitude"], r["facility_longitude"])
                 if dist <= radius_km:
                     r["_distance_km"] = dist
+                    r["_relevance_score"] = relevance_score(r, care_need, keywords)
                     ranked.append(r)
             except Exception:
                 continue
 
-        ranked.sort(key=lambda x: x["_distance_km"])
+        if is_orthopedic_query(care_need, keywords):
+            ranked = [r for r in ranked if r.get("_relevance_score", 0) >= 4]
+
+        ranked.sort(key=lambda x: (-x.get("_relevance_score", 0), x["_distance_km"]))
 
         if not ranked:
             safe_city = html_safe(city)
@@ -769,14 +823,14 @@ if query:
         else:
             safe_city = html_safe(city)
             shown_count = min(len(ranked), 5)
-            st.markdown(f'<div class="result-count">Showing the {shown_count} nearest of {len(ranked)} facilit{"y" if len(ranked)==1 else "ies"} within {radius_km} km of {safe_city}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="result-count">Showing the {shown_count} best matching nearby facilit{"y" if len(ranked)==1 else "ies"} within {radius_km} km of {safe_city}</div>', unsafe_allow_html=True)
 
             for r in ranked[:5]:
                 dist = r["_distance_km"]
                 loc_parts = [p for p in [r.get("district") or r.get("address_city"), r.get("state") or r.get("address_stateOrRegion")] if p]
                 loc_str = ", ".join(loc_parts) if loc_parts else "Location on file"
                 conf = r.get("location_confidence", "unresolved")
-                evidence = extract_evidence(r, keywords)
+                evidence = extract_evidence(r, keywords, care_need)
                 doctors = r.get("numberDoctors")
                 capacity = r.get("capacity")
 
