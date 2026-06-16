@@ -556,7 +556,13 @@ def facility_strength_label(row: dict) -> str:
     return ", ".join(signals)
 
 
-def search_facilities(keywords: list, limit: int = 50):
+def location_bounds(lat: float, lon: float, radius_km: int) -> tuple[float, float, float, float]:
+    lat_delta = radius_km / 111.0
+    lon_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 1)
+    return lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta
+
+
+def search_facilities(keywords: list, coords: tuple | None = None, radius_km: int | None = None, limit: int = 500):
     """Pull candidates matching any keyword across evidence columns."""
     safe_keywords = unique_terms(keywords)
     if not safe_keywords:
@@ -569,6 +575,14 @@ def search_facilities(keywords: list, limit: int = 50):
         f"LOWER(description) LIKE '%{escape_sql_like_term(kw)}%')"
         for kw in safe_keywords
     ])
+    geo_conditions = ""
+    if coords and radius_km:
+        min_lat, max_lat, min_lon, max_lon = location_bounds(coords[0], coords[1], radius_km)
+        geo_conditions = f"""
+          AND facility_latitude BETWEEN {min_lat:.6f} AND {max_lat:.6f}
+          AND facility_longitude BETWEEN {min_lon:.6f} AND {max_lon:.6f}
+        """
+
     query = f"""
         SELECT
             unique_id, name, organization_type,
@@ -582,6 +596,7 @@ def search_facilities(keywords: list, limit: int = 50):
         FROM workspace.default.sos_facility_index
         WHERE facility_latitude IS NOT NULL
           AND facility_longitude IS NOT NULL
+          {geo_conditions}
           AND ({kw_conditions})
         LIMIT {limit}
     """
@@ -710,7 +725,7 @@ if query:
 
         with st.spinner(f"Searching for {care_need} facilities near {city}…"):
             try:
-                results = search_facilities(keywords, limit=100)
+                results = search_facilities(keywords, coords=coords, radius_km=radius_km, limit=500)
             except Exception as e:
                 st.error(f"Database error: {e}")
                 results = []
