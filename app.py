@@ -224,10 +224,22 @@ def get_required_env(name):
     return value
 
 
+def get_databricks_http_path():
+    http_path = os.getenv("DATABRICKS_HTTP_PATH")
+    if http_path:
+        return http_path
+
+    warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID")
+    if warehouse_id:
+        return f"/sql/1.0/warehouses/{warehouse_id}"
+
+    raise RuntimeError("Missing DATABRICKS_HTTP_PATH or DATABRICKS_WAREHOUSE_ID.")
+
+
 @st.cache_resource
 def get_connection():
     server_hostname = get_databricks_server_hostname()
-    http_path = get_required_env("DATABRICKS_HTTP_PATH")
+    http_path = get_databricks_http_path()
     client_id = os.getenv("DATABRICKS_CLIENT_ID")
     client_secret = os.getenv("DATABRICKS_CLIENT_SECRET")
 
