@@ -267,31 +267,17 @@ def parse_query(query: str):
     return city_found, coords, care_found, keywords
 
 # ── Databricks SQL connection ─────────────────────────────────────────────────
-def get_user_token() -> str:
-    """Extract the user's forwarded access token from Streamlit request headers."""
-    try:
-        from streamlit.web.server.websocket_headers import _get_websocket_headers
-        headers = _get_websocket_headers()
-        if headers:
-            token = headers.get("X-Forwarded-Access-Token")
-            if token:
-                return token
-    except Exception:
-        pass
-    # Fallback for local dev / if header not available
-    return os.environ.get("DATABRICKS_TOKEN", "")
-
 def get_connection():
-    """Create a new connection using the user's forwarded access token.
-    Not cached with cache_resource since each user has their own token."""
-    token = get_user_token()
-    if not token:
-        st.error("Could not retrieve access token. Please refresh the page.")
+    """Connect to the SQL warehouse using the user's forwarded access token.
+    Databricks Apps injects X-Forwarded-Access-Token via st.context.headers."""
+    user_token = st.context.headers.get("X-Forwarded-Access-Token")
+    if not user_token:
+        st.error("Authentication failed. Please refresh the page.")
         st.stop()
     return sql.connect(
         server_hostname=os.environ["DATABRICKS_HOST"],
         http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
-        access_token=token,
+        access_token=user_token,
     )
 
 # ── Query gold table ──────────────────────────────────────────────────────────
@@ -357,6 +343,17 @@ def extract_evidence(row: dict, keywords: list) -> list:
     return snippets
 
 # ── Header ────────────────────────────────────────────────────────────────────
+# DEBUG: show available headers (remove before final demo)
+with st.expander("🔧 Debug: Auth Headers", expanded=False):
+    try:
+        headers = dict(st.context.headers)
+        relevant = {k: v[:20]+"..." if len(str(v)) > 20 else v 
+                   for k, v in headers.items() 
+                   if any(x in k.lower() for x in ["forward", "auth", "token", "email", "user"])}
+        st.json(relevant if relevant else {"note": "no forwarded headers found", "all_keys": list(headers.keys())})
+    except Exception as e:
+        st.write(f"Error reading headers: {e}")
+
 st.markdown("""
 <div class="sos-header">
     <div class="sos-wordmark">SOS</div>
