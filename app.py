@@ -191,6 +191,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2*R*math.asin(math.sqrt(a))
 
 # ── Geo lookup from PIN directory ─────────────────────────────────────────────
+@st.cache_data(ttl=3600)
 def lookup_location_from_db(location_text: str):
     """
     Fallback geo lookup against referral_copilot_pincode_district_lookup.
@@ -276,6 +277,7 @@ def get_connection():
     )
 
 # ── Query gold table ──────────────────────────────────────────────────────────
+@st.cache_data(ttl=300)
 def search_facilities(keywords: list, limit: int = 50):
     """Pull candidates matching any keyword across evidence columns."""
     kw_conditions = " OR ".join([
