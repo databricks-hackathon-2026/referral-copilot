@@ -345,15 +345,28 @@ def extract_json_object(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-@st.cache_resource
-def get_workspace_client():
-    from databricks.sdk import WorkspaceClient
-
-    return WorkspaceClient()
-
-
 def get_gateway_access_token():
     return os.getenv("GATEWAY-ACCESS_TOKEN") or os.getenv("GATEWAY_ACCESS_TOKEN")
+
+
+def extract_chat_content(data: dict) -> str:
+    try:
+        message = data["choices"][0]["message"]
+        if isinstance(message, dict):
+            content = message.get("content")
+        else:
+            content = getattr(message, "content", None)
+        if content:
+            return content
+    except (KeyError, IndexError, TypeError):
+        pass
+
+    for key in ["content", "text", "output_text"]:
+        content = data.get(key)
+        if content:
+            return content
+
+    raise ValueError(f"Unexpected LLM gateway response shape: {list(data.keys())}")
 
 
 def query_llm_gateway(prompt: str) -> str:
@@ -385,7 +398,7 @@ def query_llm_gateway(prompt: str) -> str:
     )
     response.raise_for_status()
     data = response.json()
-    return data["choices"][0]["message"]["content"]
+    return extract_chat_content(data)
 
 
 def get_search_plan_agentic(query: str, default_radius_km: int) -> dict | None:
@@ -457,7 +470,7 @@ def plan_search(query: str, default_radius_km: int) -> dict:
             return agent_plan
     except Exception as e:
         traceback.print_exc()
-        detail = type(e).__name__
+        detail = f"{type(e).__name__}: {e}"
         if isinstance(e, requests.HTTPError) and e.response is not None:
             detail = f"HTTP {e.response.status_code}"
             print(f"Planner HTTP response: {e.response.text[:1000]}")
