@@ -192,7 +192,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 # ── Geo lookup from PIN directory ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
-def lookup_location_from_db(location_text: str):
+def lookup_location_from_db(location_text: str, token: str = ""):
     """
     Fallback geo lookup against referral_copilot_pincode_district_lookup.
     Handles:
@@ -202,7 +202,11 @@ def lookup_location_from_db(location_text: str):
     """
     loc = location_text.strip()
     try:
-        conn = get_connection()
+        conn = sql.connect(
+                server_hostname=os.environ["DATABRICKS_HOST"],
+                http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
+                access_token=token,
+            )
         with conn.cursor() as cur:
             if loc.isdigit() and len(loc) == 6:
                 # PIN code lookup
@@ -262,7 +266,8 @@ def parse_query(query: str):
 
     # 2. Fallback: PIN code or district name lookup against pincode_district_lookup
     if not coords and location_text:
-        city_found, coords = lookup_location_from_db(location_text)
+        token = st.context.headers.get("X-Forwarded-Access-Token", "")
+        city_found, coords = lookup_location_from_db(location_text, token)
 
     return city_found, coords, care_found, keywords
 
@@ -282,8 +287,8 @@ def get_connection():
 
 # ── Query gold table ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
-def search_facilities(keywords: list, limit: int = 50):
-    """Pull candidates matching any keyword across evidence columns."""
+def _run_facility_query(keywords: list, token: str, limit: int = 50):
+    """Cached query -- token passed explicitly so cache key includes auth context."""
     kw_conditions = " OR ".join([
         f"(LOWER(specialties) LIKE '%{kw}%' OR "
         f"LOWER(standardized_services) LIKE '%{kw}%' OR "
@@ -307,11 +312,20 @@ def search_facilities(keywords: list, limit: int = 50):
           AND ({kw_conditions})
         LIMIT {limit}
     """
-    conn = get_connection()
+    conn = sql.connect(
+        server_hostname=os.environ["DATABRICKS_HOST"],
+        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
+        access_token=token,
+    )
     with conn.cursor() as cur:
         cur.execute(query)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+def search_facilities(keywords: list, limit: int = 50):
+    """Get user token from request context, then run cached query."""
+    token = st.context.headers.get("X-Forwarded-Access-Token", "")
+    return _run_facility_query(tuple(keywords), token, limit)
 
 # ── Confidence badge ──────────────────────────────────────────────────────────
 def confidence_badge(level):
