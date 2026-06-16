@@ -9,4 +9,4 @@ command:
 
 env:
   - name: DATABRICKS_WAREHOUSE_ID
-    valueFrom: sql-warehouse
+    value: "11aa985a3f1d046f"
