@@ -195,6 +195,13 @@ STOPWORDS = {
     "treatment", "with",
 }
 
+EVIDENCE_FIELD_LABELS = {
+    "specialties": "Matched specialty",
+    "standardized_services": "Matched service",
+    "parsed_capability": "Matched capability",
+    "description": "Mentioned in facility notes",
+}
+
 # ── Haversine ─────────────────────────────────────────────────────────────────
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -519,6 +526,13 @@ def confidence_badge(level):
     return f'<span class="confidence-badge {css}">📍 {label}</span>'
 
 # ── Evidence snippets ─────────────────────────────────────────────────────────
+def clean_evidence_text(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    value = value.strip("[]{}()")
+    value = value.strip(",;:.\"'")
+    return value
+
+
 def extract_evidence(row: dict, keywords: list) -> list:
     snippets = []
     for field in ["specialties", "standardized_services", "parsed_capability", "description"]:
@@ -527,11 +541,17 @@ def extract_evidence(row: dict, keywords: list) -> list:
             if kw.lower() in val.lower():
                 # Find a short excerpt around the keyword
                 idx = val.lower().find(kw.lower())
-                start = max(0, idx - 30)
-                end = min(len(val), idx + 60)
-                excerpt = val[start:end].strip().strip(",").strip('"').strip("'")
-                if excerpt and excerpt not in snippets:
-                    snippets.append(f"…{excerpt}…" if start > 0 else excerpt)
+                start = max(0, idx - 36)
+                end = min(len(val), idx + 84)
+                excerpt = clean_evidence_text(val[start:end])
+                if start > 0:
+                    excerpt = f"...{excerpt}"
+                if end < len(val):
+                    excerpt = f"{excerpt}..."
+                label = EVIDENCE_FIELD_LABELS.get(field, "Matched evidence")
+                snippet = f"{label}: {excerpt}"
+                if excerpt and snippet not in snippets:
+                    snippets.append(snippet)
                 if len(snippets) >= 4:
                     return snippets
     return snippets
@@ -620,7 +640,7 @@ if query:
 
                 evidence_html = ""
                 if evidence:
-                    tags = "".join(f'<span class="evidence-tag">{html_safe(e[:80])}</span>' for e in evidence)
+                    tags = "".join(f'<span class="evidence-tag">{html_safe(e[:140])}</span>' for e in evidence)
                     evidence_html = f'<div class="evidence-section"><div class="evidence-label">Evidence</div>{tags}</div>'
 
                 contact_parts = []
