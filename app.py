@@ -210,7 +210,7 @@ def parse_query(query: str):
 def get_connection():
     return sql.connect(
         server_hostname=os.environ["DATABRICKS_HOST"],
-        http_path=os.environ["DATABRICKS_HTTP_PATH"],
+        http_path="/sql/1.0/warehouses/11aa985a3f1d046f",
         client_id=os.environ["DATABRICKS_CLIENT_ID"],
         client_secret=os.environ["DATABRICKS_CLIENT_SECRET"],
     )
