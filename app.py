@@ -4,6 +4,7 @@ import json
 import math
 import re
 import requests
+import traceback
 from databricks import sql
 from databricks.sdk.core import Config, oauth_service_principal
 import os
@@ -382,8 +383,12 @@ def plan_search(query: str, default_radius_km: int) -> dict:
         agent_plan = get_search_plan_agentic(query, default_radius_km)
         if agent_plan:
             return agent_plan
-    except Exception:
-        st.caption("Planner unavailable; using keyword fallback.")
+    except Exception as e:
+        traceback.print_exc()
+        detail = type(e).__name__
+        if isinstance(e, requests.HTTPError) and e.response is not None:
+            detail = f"HTTP {e.response.status_code}"
+        st.caption(f"Planner unavailable ({detail}); using keyword fallback.")
 
     return get_search_plan_fallback(query, default_radius_km)
 
